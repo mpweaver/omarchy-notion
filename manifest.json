@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "id": "user.omarchy-notion",
+  "name": "Omarchy Notion Capture",
+  "version": "1.0.0",
+  "author": "Omarchy Notion contributors",
+  "description": "Capture notes to an Omarchy database in Notion from the bar or CLI",
+  "kinds": ["bar-widget"],
+  "entryPoints": {
+    "barWidget": "NotionCapture.qml"
+  },
+  "barWidget": {
+    "displayName": "Notion Capture",
+    "description": "Quick capture for Notion and local agents",
+    "category": "Productivity",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}

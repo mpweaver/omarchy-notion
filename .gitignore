@@ -1,0 +1,8 @@
+# Generated credentials/configuration and clipboard cache must never be tracked.
+config.json
+.env
+*.token
+*.secret
+*.log
+*.tmp
+*.bak

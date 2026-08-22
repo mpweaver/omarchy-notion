@@ -1,0 +1,258 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+api_version="2026-03-11"
+config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy-notion"
+config_file="$config_dir/config.json"
+keyring_service="omarchy-notion"
+keyring_account="default"
+
+die() { printf 'notion: %s\n' "$*" >&2; exit 1; }
+need() { command -v "$1" >/dev/null 2>&1 || die "missing required command: $1"; }
+
+for dependency in curl jq secret-tool; do need "$dependency"; done
+
+token() {
+  secret-tool lookup service "$keyring_service" account "$keyring_account" 2>/dev/null || true
+}
+
+api() {
+  local method=$1 endpoint=$2 body=${3:-} notion_token response
+  notion_token=$(token)
+  [[ -n $notion_token ]] || die "Notion token is not configured; run: notion setup"
+  if [[ -n $body ]]; then
+    response=$(curl --silent --show-error --fail-with-body \
+      --request "$method" "https://api.notion.com/v1/$endpoint" \
+      --header "Authorization: Bearer $notion_token" \
+      --header "Notion-Version: $api_version" \
+      --header 'Content-Type: application/json' \
+      --data "$body") || { printf '%s\n' "$response" >&2; return 1; }
+  else
+    response=$(curl --silent --show-error --fail-with-body \
+      --request "$method" "https://api.notion.com/v1/$endpoint" \
+      --header "Authorization: Bearer $notion_token" \
+      --header "Notion-Version: $api_version") || { printf '%s\n' "$response" >&2; return 1; }
+  fi
+  printf '%s\n' "$response"
+}
+
+notion_id() {
+  local input=$1 compact
+  compact=$(printf '%s' "$input" | grep -Eo '[0-9a-fA-F]{32}|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}' | tail -n 1 || true)
+  [[ -n $compact ]] || die "could not find a Notion page ID in that value"
+  printf '%s' "$compact" | tr -d '-'
+}
+
+setup_connection() {
+  local notion_token parent_input parent_id payload response data_source_id database_id database_url
+  printf '%s\n' 'Create a Notion connection with Insert content capability, then copy its token.'
+  printf '%s\n' 'Share the page that should contain the Omarchy database with that connection.'
+  read -rsp 'Notion token: ' notion_token
+  printf '\n'
+  [[ -n $notion_token ]] || die "token cannot be empty"
+  printf '%s' "$notion_token" | secret-tool store --label='Omarchy Notion connection' service "$keyring_service" account "$keyring_account"
+  unset notion_token
+
+  read -rp 'Parent Notion page URL or ID: ' parent_input
+  parent_id=$(notion_id "$parent_input")
+  payload=$(jq -cn --arg page "$parent_id" '{
+    parent: {type:"page_id", page_id:$page},
+    title: [{type:"text", text:{content:"Omarchy"}}],
+    description: [{type:"text", text:{content:"Quick captures from the Omarchy widget, CLI, and agents."}}],
+    icon: {type:"emoji", emoji:"📝"},
+    is_inline: false,
+    initial_data_source: {
+      properties: {
+        Name: {title:{}},
+        Tags: {multi_select:{options:[]}},
+        Source: {select:{options:[
+          {name:"Widget", color:"blue"},
+          {name:"CLI", color:"gray"},
+          {name:"Agent", color:"purple"}
+        ]}},
+        Created: {created_time:{}}
+      }
+    }
+  }')
+  response=$(api POST databases "$payload") || die "could not create the database; confirm the connection has Insert content access and the parent page is shared with it"
+  database_id=$(jq -er '.id' <<<"$response")
+  data_source_id=$(jq -er '.data_sources[0].id' <<<"$response")
+  database_url=$(jq -r '.url // empty' <<<"$response")
+
+  mkdir -p "$config_dir"
+  umask 077
+  jq -n --arg database_id "$database_id" --arg data_source_id "$data_source_id" --arg url "$database_url" \
+    '{database_id:$database_id,data_source_id:$data_source_id,url:$url,name:"Omarchy"}' > "$config_file"
+  printf 'Created the Omarchy database.\n%s\n' "$database_url"
+}
+
+status() {
+  local configured=false has_token=false
+  [[ -s $config_file ]] && jq -e '.data_source_id and .database_id' "$config_file" >/dev/null 2>&1 && configured=true
+  [[ -n $(token) ]] && has_token=true
+  jq -n --argjson configured "$configured" --argjson has_token "$has_token" \
+    --arg url "$(jq -r '.url // empty' "$config_file" 2>/dev/null || true)" \
+    '{configured:$configured,has_token:$has_token,url:$url}'
+}
+
+capture() {
+  [[ -s $config_file ]] || die "not configured; run: notion setup"
+  local title="" body="" tags="" source="CLI" image_path="" json_input=false clipboard_image=false delete_image=false data_source_id payload response page_id
+  while (( $# )); do
+    case "$1" in
+      -t|--title)
+        shift
+        title=""
+        while (( $# )) && [[ $1 != -b && $1 != --body && $1 != -h && $1 != --tags && $1 != -s && $1 != --source && $1 != -i && $1 != --image && $1 != --json ]]; do
+          title+="${title:+ }$1"
+          shift
+        done
+        [[ -n $title ]] || die "title cannot be empty"
+        ;;
+      -b|--body)
+        shift
+        body=""
+        while (( $# )) && [[ $1 != -t && $1 != --title && $1 != -h && $1 != --tags && $1 != -s && $1 != --source && $1 != -i && $1 != --image && $1 != --json ]]; do
+          body+="${body:+ }$1"
+          shift
+        done
+        ;;
+      -h|--tags)
+        shift
+        tags=""
+        while (( $# )) && [[ $1 != -t && $1 != --title && $1 != -b && $1 != --body && $1 != -s && $1 != --source && $1 != -i && $1 != --image && $1 != --json ]]; do
+          tags+="${tags:+ }$1"
+          shift
+        done
+        ;;
+      -s|--source) source=${2:?}; shift 2 ;;
+      -i|--image) clipboard_image=true; shift ;;
+      --json) json_input=true; shift ;;
+      *) die "unknown capture option: $1" ;;
+    esac
+  done
+  if [[ $json_input == true ]]; then
+    local input
+    IFS= read -r input || true
+    title=$(jq -er '.title' <<<"$input")
+    body=$(jq -r '.body // ""' <<<"$input")
+    tags=$(jq -r '(.tags // []) | if type == "array" then join(",") else . end' <<<"$input")
+    source=$(jq -r '.source // "Agent"' <<<"$input")
+    image_path=$(jq -r '.image_path // ""' <<<"$input")
+    delete_image=$(jq -r '.delete_image // false' <<<"$input")
+  elif [[ $body == "-" ]]; then
+    body=$(cat)
+  fi
+  if [[ $clipboard_image == true ]]; then
+    local clipboard_result
+    clipboard_result=$(clipboard_read)
+    [[ $(jq -r '.type' <<<"$clipboard_result") == image/png ]] || die "clipboard does not contain a PNG image"
+    image_path=$(jq -er '.path' <<<"$clipboard_result")
+    delete_image=true
+  fi
+  [[ -n $title ]] || die "title is required"
+  data_source_id=$(jq -er '.data_source_id' "$config_file")
+  payload=$(jq -cn --arg parent "$data_source_id" --arg title "$title" --arg body "$body" --arg tags "$tags" --arg source "$source" '{
+    parent:{type:"data_source_id",data_source_id:$parent},
+    properties:{
+      Name:{title:[{type:"text",text:{content:$title}}]},
+      Tags:{multi_select:($tags | split(",") | map(gsub("^\\s+|\\s+$";"") | select(length > 0) | {name:.}))},
+      Source:{select:{name:$source}}
+    },
+    markdown:$body
+  }')
+  response=$(api POST pages "$payload")
+  page_id=$(jq -er '.id' <<<"$response")
+  if [[ -n $image_path ]]; then
+    validate_png "$image_path"
+    upload_png "$image_path" "$page_id"
+    [[ $delete_image == true ]] && rm -f -- "$image_path"
+  fi
+  jq '{id,url,created_time}' <<<"$response"
+}
+
+validate_png() {
+  local image_path=$1 image_size signature max_image_size=$((20 * 1024 * 1024))
+  [[ -f $image_path ]] || die "PNG file does not exist: $image_path"
+  image_size=$(stat -c %s "$image_path")
+  (( image_size <= max_image_size )) || die "PNG is too large; the limit is 20 MB"
+  signature=$(od -An -tx1 -N8 "$image_path" | tr -d ' \n')
+  [[ $signature == 89504e470d0a1a0a ]] || die "image must be a PNG file"
+}
+
+clipboard_read() {
+  need wl-paste
+  local types cache_dir image_path image_size max_image_size=$((20 * 1024 * 1024))
+  types=$(wl-paste --list-types 2>/dev/null || true)
+  if grep -Fxq 'image/png' <<<"$types"; then
+    cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/omarchy-notion"
+    mkdir -p "$cache_dir"
+    image_path=$(mktemp "$cache_dir/clipboard-XXXXXX.png")
+    if ! wl-paste --type image/png > "$image_path" || [[ ! -s $image_path ]]; then
+      rm -f -- "$image_path"
+      die "could not read PNG from clipboard"
+    fi
+    image_size=$(stat -c %s "$image_path")
+    if (( image_size > max_image_size )); then
+      rm -f -- "$image_path"
+      die "PNG is too large; the limit is 20 MB"
+    fi
+    jq -n --arg path "$image_path" '{type:"image/png",path:$path}'
+  elif grep -Eq '^text/|^UTF8_STRING$|^STRING$' <<<"$types"; then
+    wl-paste --type text --no-newline | jq -Rs '{type:"text",text:.}'
+  else
+    die "clipboard does not contain text or a PNG image"
+  fi
+}
+
+upload_png() {
+  local image_path=$1 page_id=$2 create_response upload_id upload_response attach_payload notion_token
+  [[ -f $image_path ]] || die "clipboard PNG is no longer available"
+  create_response=$(api POST file_uploads '{"mode":"single_part","filename":"omarchy-capture.png","content_type":"image/png"}')
+  upload_id=$(jq -er '.id' <<<"$create_response")
+  notion_token=$(token)
+  upload_response=$(curl --silent --show-error --fail-with-body \
+    --request POST "https://api.notion.com/v1/file_uploads/$upload_id/send" \
+    --header "Authorization: Bearer $notion_token" \
+    --header "Notion-Version: $api_version" \
+    --form "file=@$image_path;type=image/png") || { printf '%s\n' "$upload_response" >&2; return 1; }
+  [[ $(jq -r '.status // empty' <<<"$upload_response") == uploaded ]] || die "Notion did not finish uploading the PNG"
+  attach_payload=$(jq -cn --arg id "$upload_id" '{children:[{type:"image",image:{type:"file_upload",file_upload:{id:$id}}}]}')
+  api PATCH "blocks/$page_id/children" "$attach_payload" >/dev/null
+}
+
+open_database() {
+  [[ -s $config_file ]] || die "not configured"
+  local url
+  url=$(jq -er '.url' "$config_file")
+  xdg-open "$url" >/dev/null 2>&1 &
+}
+
+usage() {
+  cat <<'EOF'
+Usage:
+  notion setup
+  notion status
+  notion -t TITLE -b TEXT [-h tag1,tag2] [-i]
+  notion capture --title TITLE [--body TEXT|-] [--tags a,b] [--source Widget|CLI|Agent]
+  notion capture --json < capture.json
+  notion clipboard-read
+  notion open
+
+Agent example:
+  printf '%s' '{"title":"Research task","body":"Investigate...","tags":["agent"]}' | notion capture --json
+EOF
+}
+
+command_name=${1:-help}
+shift || true
+case "$command_name" in
+  setup) setup_connection "$@" ;;
+  status) status ;;
+  capture) capture "$@" ;;
+  clipboard-read) clipboard_read ;;
+  open) open_database ;;
+  help|--help) usage ;;
+  -t|--title|-b|--body|-h|--tags|-i|--image) capture "$command_name" "$@" ;;
+  *) die "unknown command: $command_name" ;;
+esac
