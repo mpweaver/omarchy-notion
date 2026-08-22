@@ -16,6 +16,11 @@ Panel {
   property string databaseUrl: ""
   property string clipboardImagePath: ""
 
+  function safeMessage(value, fallback) {
+    var message = String(value || "").replace(/[\r\n]+/g, " ").trim()
+    return message === "" ? fallback : message.slice(0, 512)
+  }
+
   function refreshStatus() {
     if (!statusProcess.running) {
       statusProcess.command = [helperPath, "status", "--json"]
@@ -63,7 +68,7 @@ Panel {
         try {
           var result = JSON.parse(text)
           root.configured = result.configured === true && result.has_token === true
-          root.databaseUrl = String(result.url || "")
+          root.databaseUrl = String(result.url || "").slice(0, 2048)
           root.statusText = root.configured ? "Ready to capture" : "Setup required"
         } catch (error) {
           root.configured = false
@@ -77,9 +82,8 @@ Panel {
     id: captureProcess
     property string payload: ""
     stdinEnabled: true
-    stdout: StdioCollector { onStreamFinished: {} }
     stderr: StdioCollector {
-      onStreamFinished: if (text.trim() !== "") root.statusText = text.trim()
+      onStreamFinished: if (text.trim() !== "") root.statusText = root.safeMessage(text, "Could not save to Notion")
     }
     onStarted: {
       write(payload + "\n")
@@ -121,7 +125,10 @@ Panel {
       }
     }
     stderr: StdioCollector {
-      onStreamFinished: clipboardProcess.errorText = text.trim().replace(/^(omarchy-notion|notion):\s*/, "")
+      onStreamFinished: clipboardProcess.errorText = root.safeMessage(
+        text.trim().replace(/^(omarchy-notion|notion):\s*/, ""),
+        "Could not read clipboard"
+      )
     }
     onExited: function(exitCode) {
       if (exitCode !== 0) root.statusText = clipboardProcess.errorText || "Clipboard does not contain text or PNG"
@@ -255,6 +262,7 @@ Panel {
       Text {
         width: parent.width
         text: root.statusText
+        textFormat: Text.PlainText
         color: Qt.darker(root.barForeground, 1.2)
         font.family: root.bar ? root.bar.fontFamily : Style.font.family
         font.pixelSize: Style.font.caption

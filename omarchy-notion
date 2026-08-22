@@ -6,6 +6,15 @@ config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy-notion"
 config_file="$config_dir/config.json"
 keyring_service="omarchy-notion"
 keyring_account="default"
+api_max_bytes=$((2 * 1024 * 1024))
+api_timeout_seconds=30
+upload_timeout_seconds=120
+connect_timeout_seconds=10
+clipboard_timeout_seconds=10
+clipboard_text_max_bytes=$((128 * 1024))
+image_max_bytes=$((20 * 1024 * 1024))
+input_max_bytes=$((512 * 1024))
+error_max_chars=512
 
 die() { printf 'notion: %s\n' "$*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || die "missing required command: $1"; }
@@ -13,27 +22,56 @@ need() { command -v "$1" >/dev/null 2>&1 || die "missing required command: $1"; 
 for dependency in curl jq secret-tool; do need "$dependency"; done
 
 token() {
-  secret-tool lookup service "$keyring_service" account "$keyring_account" 2>/dev/null || true
+  timeout 5s secret-tool lookup service "$keyring_service" account "$keyring_account" 2>/dev/null || true
+}
+
+api_error() {
+  local response=${1:-} message
+  message=$(jq -r '.message // .code // empty' <<<"$response" 2>/dev/null || true)
+  message=${message//$'\n'/ }
+  message=${message:0:error_max_chars}
+  if [[ -n $message ]]; then
+    printf 'notion: Notion API request failed: %s\n' "$message" >&2
+  else
+    printf '%s\n' 'notion: Notion API request failed' >&2
+  fi
 }
 
 api() {
-  local method=$1 endpoint=$2 body=${3:-} notion_token response
+  local method=$1 endpoint=$2 body=${3:-} notion_token response auth_config
   notion_token=$(token)
   [[ -n $notion_token ]] || die "Notion token is not configured; run: notion setup"
+  auth_config=$(printf 'header = "Authorization: Bearer %s"\n' "$notion_token")
   if [[ -n $body ]]; then
     response=$(curl --silent --show-error --fail-with-body \
+      --connect-timeout "$connect_timeout_seconds" \
+      --max-time "$api_timeout_seconds" \
+      --max-filesize "$api_max_bytes" \
       --request "$method" "https://api.notion.com/v1/$endpoint" \
-      --header "Authorization: Bearer $notion_token" \
+      --config /dev/fd/3 \
       --header "Notion-Version: $api_version" \
       --header 'Content-Type: application/json' \
-      --data "$body") || { printf '%s\n' "$response" >&2; return 1; }
+      --data-binary @/dev/fd/4 \
+      3<<<"$auth_config" 4<<<"$body") || { api_error "$response"; return 1; }
   else
     response=$(curl --silent --show-error --fail-with-body \
+      --connect-timeout "$connect_timeout_seconds" \
+      --max-time "$api_timeout_seconds" \
+      --max-filesize "$api_max_bytes" \
       --request "$method" "https://api.notion.com/v1/$endpoint" \
-      --header "Authorization: Bearer $notion_token" \
-      --header "Notion-Version: $api_version") || { printf '%s\n' "$response" >&2; return 1; }
+      --config /dev/fd/3 \
+      --header "Notion-Version: $api_version" \
+      3<<<"$auth_config") || { api_error "$response"; return 1; }
   fi
   printf '%s\n' "$response"
+}
+
+read_bounded_stdin() {
+  local max_bytes=$1 label=$2 value byte_count
+  value=$(head -c "$((max_bytes + 1))")
+  byte_count=$(printf '%s' "$value" | wc -c)
+  (( byte_count <= max_bytes )) || die "$label is too large; the limit is $max_bytes bytes"
+  printf '%s' "$value"
 }
 
 notion_id() {
@@ -91,7 +129,7 @@ status() {
   [[ -s $config_file ]] && jq -e '.data_source_id and .database_id' "$config_file" >/dev/null 2>&1 && configured=true
   [[ -n $(token) ]] && has_token=true
   jq -n --argjson configured "$configured" --argjson has_token "$has_token" \
-    --arg url "$(jq -r '.url // empty' "$config_file" 2>/dev/null || true)" \
+    --arg url "$(jq -r '(.url // empty)[:2048]' "$config_file" 2>/dev/null || true)" \
     '{configured:$configured,has_token:$has_token,url:$url}'
 }
 
@@ -133,7 +171,7 @@ capture() {
   done
   if [[ $json_input == true ]]; then
     local input
-    IFS= read -r input || true
+    input=$(read_bounded_stdin "$input_max_bytes" "JSON input")
     title=$(jq -er '.title' <<<"$input")
     body=$(jq -r '.body // ""' <<<"$input")
     tags=$(jq -r '(.tags // []) | if type == "array" then join(",") else . end' <<<"$input")
@@ -141,7 +179,7 @@ capture() {
     image_path=$(jq -r '.image_path // ""' <<<"$input")
     delete_image=$(jq -r '.delete_image // false' <<<"$input")
   elif [[ $body == "-" ]]; then
-    body=$(cat)
+    body=$(read_bounded_stdin "$input_max_bytes" "note body")
   fi
   if [[ $clipboard_image == true ]]; then
     local clipboard_result
@@ -172,50 +210,79 @@ capture() {
 }
 
 validate_png() {
-  local image_path=$1 image_size signature max_image_size=$((20 * 1024 * 1024))
+  local image_path=$1 image_size signature
   [[ -f $image_path ]] || die "PNG file does not exist: $image_path"
   image_size=$(stat -c %s "$image_path")
-  (( image_size <= max_image_size )) || die "PNG is too large; the limit is 20 MB"
+  (( image_size <= image_max_bytes )) || die "PNG is too large; the limit is 20 MB"
   signature=$(od -An -tx1 -N8 "$image_path" | tr -d ' \n')
   [[ $signature == 89504e470d0a1a0a ]] || die "image must be a PNG file"
 }
 
 clipboard_read() {
   need wl-paste
-  local types cache_dir image_path image_size max_image_size=$((20 * 1024 * 1024))
-  types=$(wl-paste --list-types 2>/dev/null || true)
+  local types cache_dir clipboard_path byte_count paste_status
+  types=$(timeout "$clipboard_timeout_seconds" wl-paste --list-types 2>/dev/null | head -c 8192 || true)
   if grep -Fxq 'image/png' <<<"$types"; then
     cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/omarchy-notion"
     mkdir -p "$cache_dir"
-    image_path=$(mktemp "$cache_dir/clipboard-XXXXXX.png")
-    if ! wl-paste --type image/png > "$image_path" || [[ ! -s $image_path ]]; then
-      rm -f -- "$image_path"
-      die "could not read PNG from clipboard"
-    fi
-    image_size=$(stat -c %s "$image_path")
-    if (( image_size > max_image_size )); then
-      rm -f -- "$image_path"
+    clipboard_path=$(mktemp "$cache_dir/clipboard-XXXXXX.png")
+    set +e
+    timeout "$clipboard_timeout_seconds" wl-paste --type image/png 2>/dev/null \
+      | head -c "$((image_max_bytes + 1))" > "$clipboard_path"
+    paste_status=${PIPESTATUS[0]}
+    set -e
+    byte_count=$(stat -c %s "$clipboard_path")
+    if (( byte_count > image_max_bytes )); then
+      rm -f -- "$clipboard_path"
       die "PNG is too large; the limit is 20 MB"
     fi
-    jq -n --arg path "$image_path" '{type:"image/png",path:$path}'
+    if (( paste_status != 0 )) || [[ ! -s $clipboard_path ]]; then
+      rm -f -- "$clipboard_path"
+      die "could not read PNG from clipboard"
+    fi
+    validate_png "$clipboard_path"
+    jq -n --arg path "$clipboard_path" '{type:"image/png",path:$path}'
   elif grep -Eq '^text/|^UTF8_STRING$|^STRING$' <<<"$types"; then
-    wl-paste --type text --no-newline | jq -Rs '{type:"text",text:.}'
+    cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/omarchy-notion"
+    mkdir -p "$cache_dir"
+    clipboard_path=$(mktemp "$cache_dir/clipboard-XXXXXX.txt")
+    set +e
+    timeout "$clipboard_timeout_seconds" wl-paste --type text --no-newline 2>/dev/null \
+      | head -c "$((clipboard_text_max_bytes + 1))" > "$clipboard_path"
+    paste_status=${PIPESTATUS[0]}
+    set -e
+    byte_count=$(stat -c %s "$clipboard_path")
+    if (( byte_count > clipboard_text_max_bytes )); then
+      rm -f -- "$clipboard_path"
+      die "clipboard text is too large; the limit is 128 KiB"
+    fi
+    if (( paste_status != 0 )); then
+      rm -f -- "$clipboard_path"
+      die "could not read text from clipboard"
+    fi
+    jq -Rs '{type:"text",text:.}' < "$clipboard_path"
+    rm -f -- "$clipboard_path"
   else
     die "clipboard does not contain text or a PNG image"
   fi
 }
 
 upload_png() {
-  local image_path=$1 page_id=$2 create_response upload_id upload_response attach_payload notion_token
+  local image_path=$1 page_id=$2 create_response upload_id upload_response attach_payload notion_token auth_config
   [[ -f $image_path ]] || die "clipboard PNG is no longer available"
   create_response=$(api POST file_uploads '{"mode":"single_part","filename":"omarchy-capture.png","content_type":"image/png"}')
   upload_id=$(jq -er '.id' <<<"$create_response")
   notion_token=$(token)
+  auth_config=$(printf 'header = "Authorization: Bearer %s"\n' "$notion_token")
   upload_response=$(curl --silent --show-error --fail-with-body \
+    --connect-timeout "$connect_timeout_seconds" \
+    --max-time "$upload_timeout_seconds" \
+    --max-filesize "$api_max_bytes" \
     --request POST "https://api.notion.com/v1/file_uploads/$upload_id/send" \
-    --header "Authorization: Bearer $notion_token" \
+    --config /dev/fd/3 \
     --header "Notion-Version: $api_version" \
-    --form "file=@$image_path;type=image/png") || { printf '%s\n' "$upload_response" >&2; return 1; }
+    --form "file=@$image_path;type=image/png" \
+    3<<<"$auth_config") || { api_error "$upload_response"; return 1; }
   [[ $(jq -r '.status // empty' <<<"$upload_response") == uploaded ]] || die "Notion did not finish uploading the PNG"
   attach_payload=$(jq -cn --arg id "$upload_id" '{children:[{type:"image",image:{type:"file_upload",file_upload:{id:$id}}}]}')
   api PATCH "blocks/$page_id/children" "$attach_payload" >/dev/null

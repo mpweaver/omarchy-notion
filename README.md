@@ -117,6 +117,8 @@ See [AGENT-INSTALL.md](AGENT-INSTALL.md) for explicit setup, security boundaries
 - No token, database ID, page ID, email address, or local home path is included in the repository.
 - The installation access token is stored with `secret-tool` in the user's desktop keyring.
 - The local configuration contains only generated Notion object IDs and the database URL and is created with user-only permissions.
+- Network and clipboard reads have time and byte limits; helper errors are bounded and rendered as plain text.
+- The Notion bearer token and note body are passed to `curl` through private file descriptors, not process arguments.
 - Review third-party Omarchy plugins before enabling them; plugins run as unsandboxed code in `omarchy-shell`.
 
 ## License
