@@ -16,19 +16,26 @@ The widget captures a title, Markdown note body, tags, and an optional PNG from 
 ## Install
 
 ```bash
-git clone https://github.com/mpweaver/omarchy-notion
-cd omarchy-notion
-bash install.sh
+omarchy plugin add https://github.com/mpweaver/omarchy-notion --enable --yes
+omarchy bar move user.omarchy-notion --section right
 ```
 
-The installer adds and enables `user.omarchy-notion`, places it on the right side of the bar, installs required Arch packages, and creates both `notion` and `omarchy-notion` CLI links.
+This installs and enables the widget and places it on the right side of the Omarchy bar.
+
+### Enable the terminal CLI
+
+Omarchy intentionally does not run plugin install hooks. Run the included setup once to install the required packages and create the `notion` and `omarchy-notion` command links:
+
+```bash
+bash ~/.config/omarchy/plugins/user.omarchy-notion/install.sh
+```
 
 ## First-run setup
 
 1. Open [Notion connections](https://www.notion.so/profile/integrations) and create a connection.
 2. Give it **Insert content** capability and copy its installation access token.
 3. In Notion, create or choose a normal parent page. Open that page's menu, choose **Connections**, and add the new connection.
-4. Run `notion setup`.
+4. Enable the terminal CLI as shown above, then run `notion setup`.
 5. Paste the token at the hidden prompt, then paste the shared parent page URL.
 
 The setup wizard stores the token in the desktop keyring—not in this repository or a plain-text configuration file. It creates a database named **Omarchy** with Name, Tags, Source, and Created properties.

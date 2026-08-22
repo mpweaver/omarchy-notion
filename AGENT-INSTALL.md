@@ -23,19 +23,28 @@ command -v git
 
 Stop if this is not an Omarchy system. Never reuse another person's `~/.config/omarchy-notion/config.json`, database IDs, page IDs, or keyring entry.
 
-## 2. Install the plugin
+## 2. Install the widget
 
-With the user's approval for package installation and repository cloning:
+With the user's approval for repository installation:
 
 ```bash
-workdir=$(mktemp -d)
-git clone https://github.com/mpweaver/omarchy-notion "$workdir/omarchy-notion"
-bash "$workdir/omarchy-notion/install.sh"
+omarchy plugin add https://github.com/mpweaver/omarchy-notion --enable --yes
+omarchy bar move user.omarchy-notion --section right
 ```
 
-The installer adds `curl`, `jq`, `libsecret`, and `wl-clipboard` through Omarchy, clones the plugin into `~/.config/omarchy/plugins/user.omarchy-notion`, enables its bar widget, and creates the CLI links.
+This is the standard Omarchy plugin flow and installs the repository into `~/.config/omarchy/plugins/user.omarchy-notion`.
 
-## 3. Create the Notion connection
+## 3. Enable the terminal CLI
+
+Omarchy does not run plugin install hooks. With the user's approval for package installation, run:
+
+```bash
+bash ~/.config/omarchy/plugins/user.omarchy-notion/install.sh
+```
+
+The setup adds `curl`, `jq`, `libsecret`, and `wl-clipboard` through Omarchy and creates the `notion` and `omarchy-notion` command links.
+
+## 4. Create the Notion connection
 
 This step requires the user to work in their signed-in Notion account:
 
@@ -50,7 +59,7 @@ This step requires the user to work in their signed-in Notion account:
 
 Do not ask the user to paste the token into chat, a command argument, a file, or an agent tool call.
 
-## 4. Run secure setup
+## 5. Run secure setup
 
 Launch the interactive wizard in a user-controlled terminal:
 
@@ -60,7 +69,7 @@ xdg-terminal-exec --hold notion setup
 
 The user—not the agent—must paste the token into the hidden prompt and then enter the shared parent-page URL. The wizard stores the token with `secret-tool`, creates the **Omarchy** database, and saves only the generated IDs and URL in `~/.config/omarchy-notion/config.json` with user-only permissions.
 
-## 5. Verify
+## 6. Verify
 
 After the user completes the wizard:
 
@@ -79,7 +88,7 @@ notion -t "PNG setup test" -b "Clipboard attachment test" -h setup -i
 
 The maximum PNG size is 20 MB.
 
-## 6. Agent captures
+## 7. Agent captures
 
 Prefer JSON over shell-constructed arguments:
 
