@@ -350,7 +350,7 @@ open_database() {
       '[.[] | select(.mapped == true and (.title | test("Notion"; "i")))] | first.address // empty' \
       2>/dev/null || true)
     if [[ $notion_window =~ ^0x[0-9a-fA-F]+$ ]] &&
-        hyprctl dispatch focuswindow "address:$notion_window" >/dev/null 2>&1; then
+        hyprctl dispatch "hl.dsp.focus({ window = \"address:$notion_window\" })" >/dev/null 2>&1; then
       return
     fi
   fi

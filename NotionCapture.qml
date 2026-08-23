@@ -94,7 +94,7 @@ Panel {
     }
     onExited: function(exitCode) {
       if (exitCode === 0) {
-        root.statusText = "Saved to Omarchy"
+        root.statusText = "Saved to Notion"
         titleField.text = ""
         bodyField.text = ""
         tagsField.text = ""

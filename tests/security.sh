@@ -63,7 +63,7 @@ if [[ ${1:-} == clients ]]; then
   else
     printf '%s\n' '[]'
   fi
-elif [[ ${1:-} == dispatch && ${2:-} == focuswindow && ${3:-} == address:0xabc123 ]]; then
+elif [[ ${1:-} == dispatch && ${2:-} == 'hl.dsp.focus({ window = "address:0xabc123" })' ]]; then
   : > "$TEST_FOCUS_MARKER"
 else
   exit 1
