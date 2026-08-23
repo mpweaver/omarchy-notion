@@ -70,6 +70,11 @@ assert_no_response_temp() {
 success=$(run_notion capture --title Test --body sensitive-body-marker)
 [[ $(jq -r .id <<<"$success") == page ]]
 
+jq '.url="https://app.notion.com/database"' "$test_dir/config/omarchy-notion/config.json" \
+  > "$test_dir/config/omarchy-notion/config.json.new"
+mv "$test_dir/config/omarchy-notion/config.json.new" "$test_dir/config/omarchy-notion/config.json"
+[[ $(run_notion status | jq -r .url) == "https://app.notion.com/database" ]]
+
 if MOCK_CURL_RESPONSE=oversized run_notion capture --title Test \
     >"$test_dir/oversized.out" 2>"$test_dir/oversized.err"; then
   printf '%s\n' 'oversized response unexpectedly succeeded' >&2
