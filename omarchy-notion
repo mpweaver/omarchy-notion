@@ -342,9 +342,18 @@ upload_png() {
 
 open_database() {
   [[ -s $config_file ]] || die "not configured"
-  local url
+  local url notion_window
   url=$(jq -er '.url' "$config_file")
   url=$(safe_notion_url "$url") || die "configured database URL is not a valid Notion HTTPS URL"
+  if command -v hyprctl >/dev/null 2>&1; then
+    notion_window=$(hyprctl clients -j 2>/dev/null | jq -r \
+      '[.[] | select(.mapped == true and (.title | test("Notion"; "i")))] | first.address // empty' \
+      2>/dev/null || true)
+    if [[ $notion_window =~ ^0x[0-9a-fA-F]+$ ]] &&
+        hyprctl dispatch focuswindow "address:$notion_window" >/dev/null 2>&1; then
+      return
+    fi
+  fi
   xdg-open "$url" >/dev/null 2>&1 &
 }
 

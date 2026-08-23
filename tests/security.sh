@@ -54,12 +54,35 @@ case $response in
     ;;
 esac
 EOF
+
+cat > "$test_dir/bin/hyprctl" <<'EOF'
+#!/usr/bin/env bash
+if [[ ${1:-} == clients ]]; then
+  if [[ ${MOCK_NOTION_WINDOW:-true} == true ]]; then
+    printf '%s\n' '[{"address":"0xabc123","title":"Omarchy | Notion - Chromium","mapped":true}]'
+  else
+    printf '%s\n' '[]'
+  fi
+elif [[ ${1:-} == dispatch && ${2:-} == focuswindow && ${3:-} == address:0xabc123 ]]; then
+  : > "$TEST_FOCUS_MARKER"
+else
+  exit 1
+fi
+EOF
+
+cat > "$test_dir/bin/xdg-open" <<'EOF'
+#!/usr/bin/env bash
+: > "$TEST_OPEN_MARKER"
+EOF
 chmod 700 "$test_dir/bin/secret-tool" "$test_dir/bin/curl"
+chmod 700 "$test_dir/bin/hyprctl" "$test_dir/bin/xdg-open"
 
 run_notion() {
   PATH="$test_dir/bin:$PATH" \
     XDG_CONFIG_HOME="$test_dir/config" \
     XDG_RUNTIME_DIR="$test_dir/runtime" \
+    TEST_FOCUS_MARKER="$test_dir/focused" \
+    TEST_OPEN_MARKER="$test_dir/opened" \
     "$repo_dir/omarchy-notion" "$@"
 }
 
@@ -77,6 +100,14 @@ jq '.url="https://app.notion.com/database"' "$test_dir/config/omarchy-notion/con
   > "$test_dir/config/omarchy-notion/config.json.new"
 mv "$test_dir/config/omarchy-notion/config.json.new" "$test_dir/config/omarchy-notion/config.json"
 [[ $(run_notion status | jq -r .url) == "https://app.notion.com/database" ]]
+run_notion open
+[[ -e $test_dir/focused && ! -e $test_dir/opened ]]
+MOCK_NOTION_WINDOW=false run_notion open
+for _ in {1..20}; do
+  [[ -e $test_dir/opened ]] && break
+  sleep 0.01
+done
+[[ -e $test_dir/opened ]]
 
 if MOCK_CURL_RESPONSE=oversized run_notion capture --title Test \
     >"$test_dir/oversized.out" 2>"$test_dir/oversized.err"; then

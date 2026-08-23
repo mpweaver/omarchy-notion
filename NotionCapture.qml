@@ -258,7 +258,7 @@ Panel {
         Button {
           width: (parent.width - Style.space(8)) / 2
           text: "Open in Notion"
-          onClicked: if (root.databaseUrl !== "") Quickshell.execDetached(["xdg-open", root.databaseUrl])
+          onClicked: if (root.databaseUrl !== "") Quickshell.execDetached([root.helperPath, "open"])
         }
       }
 
