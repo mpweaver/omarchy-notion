@@ -25,10 +25,16 @@ token() {
   timeout 5s secret-tool lookup service "$keyring_service" account "$keyring_account" 2>/dev/null || true
 }
 
+valid_token() {
+  local value=$1
+  (( ${#value} <= 2048 )) &&
+    [[ -n $value && $value != *$'\r'* && $value != *$'\n'* && $value != *'"'* && $value != *'\'* ]]
+}
+
 api_error() {
   local response=${1:-} message
   message=$(jq -r '.message // .code // empty' <<<"$response" 2>/dev/null || true)
-  message=${message//$'\n'/ }
+  message=$(printf '%s' "$message" | LC_ALL=C tr '\000-\037\177' ' ')
   message=${message:0:error_max_chars}
   if [[ -n $message ]]; then
     printf 'notion: Notion API request failed: %s\n' "$message" >&2
@@ -37,31 +43,72 @@ api_error() {
   fi
 }
 
+bounded_curl() {
+  local timeout_seconds=$1 response_file byte_count curl_status head_status
+  local -a pipeline_status
+  shift
+
+  umask 077
+  response_file=$(mktemp "${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/omarchy-notion-response-XXXXXX")
+  trap 'rm -f -- "$response_file"' EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  set +e
+  curl --silent --show-error --fail-with-body \
+    --connect-timeout "$connect_timeout_seconds" \
+    --max-time "$timeout_seconds" \
+    --max-filesize "$api_max_bytes" \
+    "$@" | head -c "$((api_max_bytes + 1))" > "$response_file"
+  pipeline_status=("${PIPESTATUS[@]}")
+  set -e
+  curl_status=${pipeline_status[0]}
+  head_status=${pipeline_status[1]}
+  byte_count=$(stat -c %s "$response_file")
+
+  if (( byte_count > api_max_bytes )); then
+    rm -f -- "$response_file"
+    trap - EXIT HUP INT TERM
+    printf 'notion: Notion API response exceeded the %d-byte limit\n' "$api_max_bytes" >&2
+    return 1
+  fi
+  if (( curl_status != 0 || head_status != 0 )); then
+    api_error "$(<"$response_file")"
+    rm -f -- "$response_file"
+    trap - EXIT HUP INT TERM
+    return 1
+  fi
+  cat -- "$response_file"
+  rm -f -- "$response_file"
+  trap - EXIT HUP INT TERM
+}
+
+safe_notion_url() {
+  local url=$1
+  [[ $url =~ ^https://(www\.)?notion\.so/ ]] || return 1
+  printf '%s' "$url"
+}
+
 api() {
   local method=$1 endpoint=$2 body=${3:-} notion_token response auth_config
   notion_token=$(token)
   [[ -n $notion_token ]] || die "Notion token is not configured; run: notion setup"
+  valid_token "$notion_token" || die "Notion token contains invalid characters; run: notion setup"
   auth_config=$(printf 'header = "Authorization: Bearer %s"\n' "$notion_token")
   if [[ -n $body ]]; then
-    response=$(curl --silent --show-error --fail-with-body \
-      --connect-timeout "$connect_timeout_seconds" \
-      --max-time "$api_timeout_seconds" \
-      --max-filesize "$api_max_bytes" \
+    response=$(bounded_curl "$api_timeout_seconds" \
       --request "$method" "https://api.notion.com/v1/$endpoint" \
       --config /dev/fd/3 \
       --header "Notion-Version: $api_version" \
       --header 'Content-Type: application/json' \
       --data-binary @/dev/fd/4 \
-      3<<<"$auth_config" 4<<<"$body") || { api_error "$response"; return 1; }
+      3<<<"$auth_config" 4<<<"$body") || return 1
   else
-    response=$(curl --silent --show-error --fail-with-body \
-      --connect-timeout "$connect_timeout_seconds" \
-      --max-time "$api_timeout_seconds" \
-      --max-filesize "$api_max_bytes" \
+    response=$(bounded_curl "$api_timeout_seconds" \
       --request "$method" "https://api.notion.com/v1/$endpoint" \
       --config /dev/fd/3 \
       --header "Notion-Version: $api_version" \
-      3<<<"$auth_config") || { api_error "$response"; return 1; }
+      3<<<"$auth_config") || return 1
   fi
   printf '%s\n' "$response"
 }
@@ -88,6 +135,7 @@ setup_connection() {
   read -rsp 'Notion token: ' notion_token
   printf '\n'
   [[ -n $notion_token ]] || die "token cannot be empty"
+  valid_token "$notion_token" || die "token contains unsupported characters or is too long"
   printf '%s' "$notion_token" | secret-tool store --label='Omarchy Notion connection' service "$keyring_service" account "$keyring_account"
   unset notion_token
 
@@ -116,20 +164,26 @@ setup_connection() {
   database_id=$(jq -er '.id' <<<"$response")
   data_source_id=$(jq -er '.data_sources[0].id' <<<"$response")
   database_url=$(jq -r '.url // empty' <<<"$response")
+  database_url=$(safe_notion_url "$database_url") || die "Notion returned an invalid database URL"
 
   mkdir -p "$config_dir"
   umask 077
   jq -n --arg database_id "$database_id" --arg data_source_id "$data_source_id" --arg url "$database_url" \
     '{database_id:$database_id,data_source_id:$data_source_id,url:$url,name:"Omarchy"}' > "$config_file"
+  chmod 600 "$config_file"
   printf 'Created the Omarchy database.\n%s\n' "$database_url"
 }
 
 status() {
-  local configured=false has_token=false
+  local configured=false has_token=false url=""
   [[ -s $config_file ]] && jq -e '.data_source_id and .database_id' "$config_file" >/dev/null 2>&1 && configured=true
-  [[ -n $(token) ]] && has_token=true
+  local notion_token
+  notion_token=$(token)
+  valid_token "$notion_token" && has_token=true
+  url=$(jq -r '(.url // empty)[:2048]' "$config_file" 2>/dev/null || true)
+  url=$(safe_notion_url "$url" 2>/dev/null || true)
   jq -n --argjson configured "$configured" --argjson has_token "$has_token" \
-    --arg url "$(jq -r '(.url // empty)[:2048]' "$config_file" 2>/dev/null || true)" \
+    --arg url "$url" \
     '{configured:$configured,has_token:$has_token,url:$url}'
 }
 
@@ -273,16 +327,14 @@ upload_png() {
   create_response=$(api POST file_uploads '{"mode":"single_part","filename":"omarchy-capture.png","content_type":"image/png"}')
   upload_id=$(jq -er '.id' <<<"$create_response")
   notion_token=$(token)
+  valid_token "$notion_token" || die "Notion token contains invalid characters; run: notion setup"
   auth_config=$(printf 'header = "Authorization: Bearer %s"\n' "$notion_token")
-  upload_response=$(curl --silent --show-error --fail-with-body \
-    --connect-timeout "$connect_timeout_seconds" \
-    --max-time "$upload_timeout_seconds" \
-    --max-filesize "$api_max_bytes" \
+  upload_response=$(bounded_curl "$upload_timeout_seconds" \
     --request POST "https://api.notion.com/v1/file_uploads/$upload_id/send" \
     --config /dev/fd/3 \
     --header "Notion-Version: $api_version" \
     --form "file=@$image_path;type=image/png" \
-    3<<<"$auth_config") || { api_error "$upload_response"; return 1; }
+    3<<<"$auth_config") || return 1
   [[ $(jq -r '.status // empty' <<<"$upload_response") == uploaded ]] || die "Notion did not finish uploading the PNG"
   attach_payload=$(jq -cn --arg id "$upload_id" '{children:[{type:"image",image:{type:"file_upload",file_upload:{id:$id}}}]}')
   api PATCH "blocks/$page_id/children" "$attach_payload" >/dev/null
@@ -292,6 +344,7 @@ open_database() {
   [[ -s $config_file ]] || die "not configured"
   local url
   url=$(jq -er '.url' "$config_file")
+  url=$(safe_notion_url "$url") || die "configured database URL is not a valid Notion HTTPS URL"
   xdg-open "$url" >/dev/null 2>&1 &
 }
 
