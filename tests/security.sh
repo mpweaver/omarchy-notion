@@ -10,6 +10,9 @@ chmod 700 "$test_dir/runtime"
 jq -n '{database_id:"database",data_source_id:"source",url:"https://www.notion.so/database"}' \
   > "$test_dir/config/omarchy-notion/config.json"
 
+grep -Fq 'captureProcess.stdinEnabled = true' "$repo_dir/NotionCapture.qml"
+grep -Fq 'stdinEnabled = false' "$repo_dir/NotionCapture.qml"
+
 cat > "$test_dir/bin/secret-tool" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' test-token

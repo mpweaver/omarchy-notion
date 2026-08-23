@@ -40,6 +40,7 @@ Panel {
       delete_image: clipboardImagePath !== ""
     })
     captureProcess.command = [helperPath, "capture", "--json"]
+    captureProcess.stdinEnabled = true
     captureProcess.running = true
   }
 
@@ -69,7 +70,8 @@ Panel {
           var result = JSON.parse(text)
           root.configured = result.configured === true && result.has_token === true
           root.databaseUrl = String(result.url || "").slice(0, 2048)
-          root.statusText = root.configured ? "Ready to capture" : "Setup required"
+          if (!captureProcess.running)
+            root.statusText = root.configured ? "Ready to capture" : "Setup required"
         } catch (error) {
           root.configured = false
           root.statusText = "Could not read setup status"
@@ -88,6 +90,7 @@ Panel {
     onStarted: {
       write(payload + "\n")
       payload = ""
+      stdinEnabled = false
     }
     onExited: function(exitCode) {
       if (exitCode === 0) {
